@@ -8,13 +8,8 @@ import (
 	"math"
 	"os"
 	"strings"
-	"unicode"
 	"unicode/utf8"
 )
-
-type Converter interface {
-	ConvertChunk(string) string
-}
 
 type SizedReadSeekCloser interface {
 	io.ReadSeekCloser
@@ -33,47 +28,6 @@ type Options struct {
 func (opts *Options) close() {
 	_ = opts.From.Close()
 	_ = opts.To.Close()
-}
-
-type TrimSpaces struct {
-	leadingSpacesProcessed bool
-	undecidedSpaces        strings.Builder
-}
-
-func (state *TrimSpaces) ConvertChunk(inputChunk string) string {
-	if !state.leadingSpacesProcessed {
-		inputChunk = strings.TrimLeftFunc(inputChunk, unicode.IsSpace)
-		if inputChunk != "" {
-			state.leadingSpacesProcessed = true
-		}
-	}
-	if state.leadingSpacesProcessed {
-		nonSpaceI := strings.LastIndexFunc(inputChunk, func(x rune) bool { return !unicode.IsSpace(x) })
-		if nonSpaceI < 0 {
-			state.undecidedSpaces.WriteString(inputChunk)
-			return ""
-		}
-
-		_, lastNonSpaceWidth := utf8.DecodeRuneInString(inputChunk[nonSpaceI:])
-		state.undecidedSpaces.WriteString(inputChunk[:nonSpaceI+lastNonSpaceWidth])
-		result := state.undecidedSpaces.String()
-		state.undecidedSpaces.Reset()
-		state.undecidedSpaces.WriteString(inputChunk[nonSpaceI+lastNonSpaceWidth:])
-		return result
-	}
-	return inputChunk
-}
-
-type UpperCase struct{}
-
-func (state UpperCase) ConvertChunk(inputChunk string) string {
-	return strings.ToUpper(inputChunk)
-}
-
-type LowerCase struct{}
-
-func (state LowerCase) ConvertChunk(inputChunk string) string {
-	return strings.ToLower(inputChunk)
 }
 
 var (
@@ -179,21 +133,30 @@ func runRead(
 	return nil
 }
 
+// End-to-end validation of generated config correctness.
+func postValidateParams(opts *Options) error {
+	if inpSize, err := opts.From.Size(); err != nil {
+		if !errors.Is(err, invalidOperation) { // Special case for streams
+			return fmt.Errorf("unable to get input file info: %w", err)
+		}
+	} else if opts.Offset >= inpSize {
+		return fmt.Errorf("invalid offset %v>=%v (input file size)", opts.Offset, inpSize)
+	}
+	return nil
+}
+
 func main() {
 	opts := MustParseFlags()
 	defer opts.close()
 
-	if inpSize, err := opts.From.Size(); err != nil {
-		if !errors.Is(err, invalidOperation) { // Special case for streams
-			_, _ = fmt.Fprintln(os.Stderr, "Unable to get input file info:", err)
-			os.Exit(1)
+	if err := postValidateParams(opts); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Error validating input parameters: %v\n", err)
+		if err != nil {
+			return
 		}
-	} else {
-		if opts.Offset >= inpSize {
-			_, _ = fmt.Fprintf(os.Stderr, "Invalid offset %v>=%v (input file size)\n", opts.Offset, inpSize)
-			os.Exit(2)
-		}
+		os.Exit(2)
 	}
+
 	if _, err := opts.From.Seek(opts.Offset, 1); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "Failed to set the specified offset %v: %v\n", opts.Offset, err)
 		os.Exit(1)
